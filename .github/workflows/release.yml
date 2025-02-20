@@ -1,0 +1,112 @@
+name: Release
+on:
+  release:
+    types: [published]
+
+env:
+  REGISTRY: ghcr.io
+  REPO_OWNER: ${{ github.repository_owner }}
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+jobs:
+  terraform:
+    name: Execute Terraform
+    runs-on: ubuntu-latest
+    environment: production
+
+    defaults:
+      run:
+        working-directory: configs/terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The public facing IP for the database is ipv6, GH does not support connecting to ipv6 addresses so we need this as a workaround.
+      - name: Setup WARP
+        run: |
+          echo "WARP mode: client warp+doh."
+          sudo apt-get -y update
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+
+      - name: Setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ~1.0
+
+      - name: Terraform Init
+        run: terraform init -backend-config="conn_str=postgres://${{ secrets.TF_STATE_DB_USERNAME }}:${{ secrets.TF_STATE_DB_PASSWORD }}@${{ secrets.TF_STATE_DB_HOST }}:${{ secrets.TF_STATE_DB_PORT }}/${{ secrets.TF_STATE_DB_NAME }}?sslmode=disable"
+
+      - name: Terraform Apply
+        id: apply
+        run: terraform apply -auto-approve -input=false
+        env:
+          TF_WORKSPACE: prod
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  migration:
+    name: DB migration
+    runs-on: ubuntu-latest
+    needs: [terraform]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The public facing IP for the database is ipv6, GH does not support connecting to ipv6 addresses so we need this as a workaround.
+      - name: Setup WARP
+        run: |
+          echo "WARP mode: client warp+doh."
+          sudo apt-get -y update
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Migrate
+        run: pip install yoyo-migrations "psycopg[binary]" && make migrate
+        env:
+          DB_USER: ${{ secrets.PROD_DB_USER }}
+          DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          DB_HOST: ${{ secrets.PROD_DB_HOST }}
+          DB_NAME: ${{ secrets.PROD_DB_NAME }}
+          DB_SCHEMA: ${{ secrets.PROD_DB_SCHEMA }}
+          DB_PORT: ${{ secrets.PROD_DB_PORT }}
+
+  deploy:
+    name: Deploy API
+    runs-on: ubuntu-latest
+    environment: production
+    needs: [migration]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy api
+        run: |
+          flyctl deploy --now -a prod-euromillions-api \
+            -i ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/euromillions-api:${{ github.sha }} \
+            -e EUROMILLIONS_MIN_YEAR=2004 \
+            -e EUROMILLIONS_WEB_BASE_URL=https://www.euro-millions.com \
+            -e FLASK_APP=euromillions_api \
+            -e FLASK_DEBUG=false \
+            -e DB_SCHEMA=${{ secrets.PROD_DB_SCHEMA }}

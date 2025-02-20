@@ -1,0 +1,175 @@
+name: Main
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  REPO_OWNER: ${{ github.repository_owner }}
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+jobs:
+  build:
+    name: Build API image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: v0.9.1
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4.2.0
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-single-buildx-srv
+          restore-keys: |
+            ${{ runner.os }}-single-buildx
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/euromillions-api
+          tags: type=sha,event=branch,format=long,prefix=
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+
+        # Temp fix
+        # https://github.com/docker/build-push-action/issues/252
+        # https://github.com/moby/buildkit/issues/1896
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  terraform:
+    name: Execute Terraform
+    runs-on: ubuntu-latest
+    environment: staging
+
+    defaults:
+      run:
+        working-directory: configs/terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The public facing IP for the database is ipv6, GH does not support connecting to ipv6 addresses so we need this as a workaround.
+      - name: Setup WARP
+        run: |
+          echo "WARP mode: client warp+doh."
+          sudo apt-get -y update
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+
+      - name: Setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ~1.0
+
+      - name: Terraform Format
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        run: terraform init -backend-config="conn_str=postgres://${{ secrets.TF_STATE_DB_USERNAME }}:${{ secrets.TF_STATE_DB_PASSWORD }}@${{ secrets.TF_STATE_DB_HOST }}:${{ secrets.TF_STATE_DB_PORT }}/${{ secrets.TF_STATE_DB_NAME }}?sslmode=disable"
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false
+        env:
+          TF_WORKSPACE: staging
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  migration:
+    name: DB migration
+    runs-on: ubuntu-latest
+    needs: [build, terraform]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The public facing IP for the database is ipv6, GH does not support connecting to ipv6 addresses so we need this as a workaround.
+      - name: Setup WARP
+        run: |
+          echo "WARP mode: client warp+doh."
+          sudo apt-get -y update
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Migrate
+        run: pip install yoyo-migrations "psycopg[binary]" && make migrate
+        env:
+          DB_USER: ${{ secrets.STAGING_DB_USER }}
+          DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+          DB_HOST: ${{ secrets.STAGING_DB_HOST }}
+          DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+          DB_SCHEMA: ${{ secrets.STAGING_DB_SCHEMA }}
+          DB_PORT: ${{ secrets.STAGING_DB_PORT }}
+
+  deploy:
+    name: Deploy API
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: [migration]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy api
+        run: |
+          flyctl deploy --now -a staging-euromillions-api \
+            -i ${{ env.REGISTRY }}/${{ env.REPO_OWNER }}/euromillions-api:${{ github.sha }} \
+            -e EUROMILLIONS_MIN_YEAR=2004 \
+            -e EUROMILLIONS_WEB_BASE_URL=https://www.euro-millions.com \
+            -e FLASK_APP=euromillions_api \
+            -e FLASK_DEBUG=true \
+            -e DB_SCHEMA=${{ secrets.STAGING_DB_SCHEMA }}

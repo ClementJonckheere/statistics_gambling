@@ -1,0 +1,85 @@
+name: Pull request
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+
+jobs:
+  linter:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor != 'dependabot[bot]' }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Lint Code Base
+        uses: docker://github/super-linter:slim-v5
+        env:
+          VALIDATE_ALL_CODEBASE: false
+          VALIDATE_PYTHON: true
+          VALIDATE_DOCKERFILE: true
+          VALIDATE_GITHUB_ACTIONS: true
+          VALIDATE_MARKDOWN: true
+          VALIDATE_TERRAFORM_TFLINT: true
+          VALIDATE_TERRAFORM_TERRASCAN: true
+          VALIDATE_OPENAPI: true
+          MARKDOWN_CONFIG_FILE: .markdownlint.yaml
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  terraform:
+    needs: [linter]
+    name: Terraform
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: configs/terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # The public facing IP for the database is ipv6, GH does not support connecting to ipv6 addresses so we need this as a workaround. https://github.com/actions/runner-images/issues/668
+      - name: Setup WARP
+        run: |
+          echo "WARP mode: client warp+doh."
+          sudo apt-get -y update
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update
+          sudo apt-get install -y cloudflare-warp
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos mode warp+doh
+          sudo warp-cli --accept-tos connect
+
+      - name: Setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ~1.0
+
+      - name: Terraform Format
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        run: terraform init -backend-config="conn_str=postgres://${{ secrets.TF_STATE_DB_USERNAME }}:${{ secrets.TF_STATE_DB_PASSWORD }}@${{ secrets.TF_STATE_DB_HOST }}:${{ secrets.TF_STATE_DB_PORT }}/${{ secrets.TF_STATE_DB_NAME }}?sslmode=disable"
+
+      - name: Terraform Validate
+        run: terraform validate -no-color
+
+      - name: Terraform Staging Plan
+        run: terraform plan -no-color
+        env:
+          TF_WORKSPACE: staging
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Terraform Production Plan
+        run: terraform plan -no-color
+        env:
+          TF_WORKSPACE: prod
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

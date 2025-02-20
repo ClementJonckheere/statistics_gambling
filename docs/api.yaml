@@ -1,0 +1,212 @@
+openapi: 3.0.3
+servers:
+  - url: https://euromillions.api.pedromealha.dev
+  - url: https://euromillions.staging.api.pedromealha.dev
+
+info:
+  description: >-
+    This is an public API for euromillions draws results and statistics. An REST API built to be fast, flexible and simple.
+  version: 2.5.0
+  title: Euromillions API
+  contact:
+    name: Pedro Mealha
+    url: 'https://github.com/pedro-mealha/euromillions-api'
+paths:
+  /draws:
+    get:
+      parameters:
+      - in: query
+        name: year
+        required: false
+        schema:
+            type: integer
+            minimum: 2004
+      - in: query
+        name: dates
+        required: false
+        schema:
+            type: string
+        examples:
+          startDate:
+            summary: Filter draws with a start date
+            value: '2021-01-01'
+          betweenDates:
+            summary: Filter draws with a start date and a end date
+            value: '2021-01-01,2021-02-01'
+          endDate:
+            summary: Filter draws with a end date
+            value: ',2021-02-01'
+      summary: Fetch all draws results
+      deprecated: true
+      description: Deprecated in favour of GET /v1/draws
+      tags:
+        - draws
+      responses:
+        '200':
+          description: List of all draws results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draws'
+  /draws/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+        example: 52021
+    get:
+      summary: Fetch a specific draw result.
+      deprecated: true
+      description: Deprecated in favour of GET /v1/draws/:draw_id
+      tags:
+        - draws
+      responses:
+        '200':
+          description: Contest draw data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draw'
+  /v1/draws:
+    get:
+      parameters:
+      - in: query
+        name: year
+        required: false
+        schema:
+            type: integer
+            minimum: 2004
+      - in: query
+        name: dates
+        required: false
+        schema:
+            type: string
+        examples:
+          startDate:
+            summary: Filter draws with a start date
+            value: '2021-01-01'
+          betweenDates:
+            summary: Filter draws with a start date and a end date
+            value: '2021-01-01,2021-02-01'
+          endDate:
+            summary: Filter draws with a end date
+            value: ',2021-02-01'
+      summary: Fetch all draws results
+      tags:
+        - draws
+      responses:
+        '200':
+          description: List of all draws results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrawsV1'
+  /v1/draws/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+        example: 52021
+    get:
+      summary: Fetch a specific draw result.
+      tags:
+        - draws
+      responses:
+        '200':
+          description: Contest draw data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrawV1'
+
+
+components:
+  schemas:
+    Draw:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        draw_id:
+          type: integer
+          example: 262021
+        numbers:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 50
+          example: [1, 5, 24, 50, 42]
+        stars:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 12
+          example: [3, 12]
+        date:
+          type: string
+          example: Tue, 01 Oct 2024 00:00:00 GMT
+        prize:
+          type: integer
+          format: float
+          example: 130000.00
+        has_winner:
+          type: boolean
+    DrawV1:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        draw_id:
+          type: integer
+          example: 262021
+        numbers:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 50
+          example: [1, 5, 24, 50, 42]
+        stars:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 12
+          example: [3, 12]
+        date:
+          type: string
+          format: yyyy-mm-dd
+          example: "2024-12-25"
+        has_winner:
+          type: boolean
+        prizes:
+          type: array
+          items:
+            type: object
+            properties:
+              prize:
+                type: integer
+                format: float
+              winners:
+                type: integer
+              matched_numbers:
+                type: integer
+              matched_stars:
+                type: integer
+          example: [{ "prize": 130000.00, "winners": 2, "matched_numbers": 5, "matched_stars": 2 }]
+    Draws:
+      type: array
+      items:
+        $ref: "#/components/schemas/Draw"
+    DrawsV1:
+      type: array
+      items:
+        $ref: "#/components/schemas/DrawV1"
